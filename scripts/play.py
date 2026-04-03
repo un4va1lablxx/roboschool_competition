@@ -1,19 +1,12 @@
-from pathlib import Path
-import sys
-import io
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 import isaacgym
 
 assert isaacgym
 import torch
 import numpy as np
+import cv2
 
+import glob
 import pickle as pkl
-from pathlib import Path
 
 from aliengo_gym.envs import *
 from aliengo_gym.envs.base.legged_robot_config import Cfg
@@ -22,19 +15,13 @@ from aliengo_gym.envs.aliengo.velocity_tracking import VelocityTrackingEasyEnv
 
 from tqdm import tqdm
 
-
-def resolve_latest_run_dir():
-    runs_root = Path(__file__).resolve().parents[1] / "runs" / "gait-conditioned-agility"
-    candidates = [path for path in runs_root.glob("*/train/*") if path.is_dir()]
-    if not candidates:
-        raise FileNotFoundError(f"No training runs found under {runs_root}")
-    return max(candidates, key=lambda path: path.stat().st_mtime)
-
-def _load_policy_from_jit(logdir):
-    body = torch.jit.load(logdir + '/checkpoints/body_latest.jit', map_location='cpu')
-    adaptation_module = torch.jit.load(logdir + '/checkpoints/adaptation_module_latest.jit', map_location='cpu')
+def load_policy(logdir):
+    body = torch.jit.load(logdir + '/checkpoints/body_latest.jit')
+    import os
+    adaptation_module = torch.jit.load(logdir + '/checkpoints/adaptation_module_latest.jit')
 
     def policy(obs, info={}):
+        i = 0
         latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
         action = body.forward(torch.cat((obs["obs_history"].to('cpu'), latent), dim=-1))
         info['latent'] = latent
@@ -43,54 +30,12 @@ def _load_policy_from_jit(logdir):
     return policy
 
 
-def _load_policy_from_state_dict(logdir, env):
-    from aliengo_gym_learn.ppo_cse.actor_critic import ActorCritic
+def load_env(label, headless=False):
+    dirs = glob.glob(f"../runs/{label}/*")
+    logdir = sorted(dirs)[0]
 
-    actor_critic = ActorCritic(
-        env.num_obs,
-        env.num_privileged_obs,
-        env.num_obs_history,
-        env.num_actions,
-    ).to('cpu')
-    state_dict = torch.load(logdir + '/checkpoints/ac_weights_last.pt', map_location='cpu')
-    actor_critic.load_state_dict(state_dict=state_dict, strict=True)
-    actor_critic.eval()
-
-    def policy(obs, info={}):
-        with torch.no_grad():
-            action = actor_critic.act_student(obs["obs_history"].to('cpu'), policy_info=info)
-        return action
-
-    return policy
-
-
-def load_policy(logdir, env):
-    # On CPU-only setups, JIT modules can crash with low-level c10 errors.
-    # Prefer state_dict policy in that case.
-    if not torch.cuda.is_available():
-        print("CUDA is unavailable, loading policy from ac_weights_last.pt")
-        return _load_policy_from_state_dict(logdir, env)
-    try:
-        return _load_policy_from_jit(logdir)
-    except Exception as exc:
-        print(f"Failed to load JIT policy ({exc}), falling back to ac_weights_last.pt")
-        return _load_policy_from_state_dict(logdir, env)
-
-
-def _load_pickle_with_cpu_torch(file_obj):
-    # `parameters.pkl` can contain CUDA tensors. Force deserialization to CPU
-    # so controller can start even when CUDA is unavailable.
-    original_loader = torch.storage._load_from_bytes
-    torch.storage._load_from_bytes = lambda b: torch.load(io.BytesIO(b), map_location='cpu')
-    try:
-        return pkl.load(file_obj)
-    finally:
-        torch.storage._load_from_bytes = original_loader
-
-
-def load_env(logdir: Path, headless=False):
-    with open(logdir / "parameters.pkl", 'rb') as file:
-        pkl_cfg = _load_pickle_with_cpu_torch(file)
+    with open(logdir + "/parameters.pkl", 'rb') as file:
+        pkl_cfg = pkl.load(file)
         print(pkl_cfg.keys())
         cfg = pkl_cfg["Cfg"]
         print(cfg.keys())
@@ -99,11 +44,6 @@ def load_env(logdir: Path, headless=False):
             if hasattr(Cfg, key):
                 for key2, value2 in cfg[key].items():
                     setattr(getattr(Cfg, key), key2, value2)
-        from aliengo_gym_learn.ppo_cse.actor_critic import AC_Args
-        ac_cfg = pkl_cfg.get("AC_Args", {})
-        for key, value in ac_cfg.items():
-            if hasattr(AC_Args, key):
-                setattr(AC_Args, key, value)
 
     # turn off DR for evaluation script
     Cfg.domain_rand.push_robots = False
@@ -122,36 +62,42 @@ def load_env(logdir: Path, headless=False):
 
     Cfg.env.num_recording_envs = 1
     Cfg.env.num_envs = 1
-    Cfg.env.front_camera_enabled = True
-    Cfg.env.front_camera_attach_body_name = "base"
-    Cfg.env.front_camera_offset_xyz = [0.38, 0.0, 0.18]
-    Cfg.env.front_camera_pitch_deg = 0.0
-    Cfg.terrain.mesh_type = "plane"
-    Cfg.terrain.curriculum = False
-    Cfg.terrain.measure_heights = False
     Cfg.terrain.num_rows = 1
     Cfg.terrain.num_cols = 1
     Cfg.terrain.border_size = 0
-    Cfg.terrain.center_robots = False
+    Cfg.terrain.terrain_length = 10.0
+    Cfg.terrain.terrain_width = 5.0
+    Cfg.terrain.center_robots = True
     Cfg.terrain.center_span = 1
-    Cfg.terrain.teleport_robots = False
+    Cfg.terrain.teleport_robots = True
 
-    Cfg.domain_rand.lag_timesteps = 0
-    Cfg.domain_rand.randomize_lag_timesteps = False
+    Cfg.domain_rand.lag_timesteps = 6
+    Cfg.domain_rand.randomize_lag_timesteps = True
     Cfg.control.control_type = "P"
+
+    Cfg.env.episode_length_s = 600
+
+    Cfg.env.front_camera_enabled = True
+    Cfg.env.front_camera_attach_body_name = "trunk"
+    Cfg.env.front_camera_color_width_px = 640
+    Cfg.env.front_camera_color_height_px = 394
+    Cfg.env.front_camera_depth_width_px = 640
+    Cfg.env.front_camera_depth_height_px = 424
+    Cfg.env.front_camera_color_fov_h_deg = 70.0
+    Cfg.env.front_camera_depth_fov_h_deg = 86.0
+    Cfg.env.front_camera_offset_xyz = [0.35, 0.0, 0.10]
+    Cfg.env.front_camera_pitch_deg = 0.0
 
     from aliengo_gym.envs.wrappers.history_wrapper import HistoryWrapper
 
-    sim_device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    if sim_device == 'cpu':
-        Cfg.sim.use_gpu_pipeline = False
-    env = VelocityTrackingEasyEnv(sim_device=sim_device, headless=headless, cfg=Cfg)
+    env = VelocityTrackingEasyEnv(sim_device='cuda:0', headless=headless, cfg=Cfg)
     env = HistoryWrapper(env)
 
     # load policy
     from ml_logger import logger
+    from aliengo_gym_learn.ppo_cse.actor_critic import ActorCritic
 
-    policy = load_policy(str(logdir), env)
+    policy = load_policy(logdir)
 
     return env, policy
 
@@ -159,21 +105,23 @@ def load_env(logdir: Path, headless=False):
 def play_aliengo(headless=True):
     from ml_logger import logger
 
+    from pathlib import Path
     from aliengo_gym import MINI_GYM_ROOT_DIR
     import glob
     import os
 
-    logdir = resolve_latest_run_dir()
-    env, policy = load_env(logdir, headless=headless)
+    label = "gait-conditioned-agility/aliengo-v0/train"
 
-    num_eval_steps = 1000
+    env, policy = load_env(label, headless=headless)
+
+    num_eval_steps = 1000000
     gaits = {"pronking": [0, 0, 0],
              "trotting": [0.5, 0, 0],
              "bounding": [0, 0.5, 0],
-             "pacing": [0, 0, 0.5],
-             "galloping": [0.25, 0, 0]}
+             "pacing": [0, 0, 0.5]}
 
     x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
+    command_change_interval = 100
     body_height_cmd = 0.0
     step_frequency_cmd = 3.0
     gait = torch.tensor(gaits["trotting"])
@@ -181,7 +129,6 @@ def play_aliengo(headless=True):
     pitch_cmd = 0.0
     roll_cmd = 0.0
     stance_width_cmd = 0.25
-    stance_length_cmd = 0.45
 
     measured_x_vels = np.zeros(num_eval_steps)
     target_x_vels = np.ones(num_eval_steps) * x_vel_cmd
@@ -190,29 +137,44 @@ def play_aliengo(headless=True):
     obs = env.reset()
 
     for i in tqdm(range(num_eval_steps)):
-        target_x_vels[i] = x_vel_cmd
         with torch.no_grad():
             actions = policy(obs)
-        x_vel_cmd += 0.0015
+
+        if i % command_change_interval == 0:
+            x_vel_cmd = np.random.uniform(-0.5, 2.0)
+            y_vel_cmd = np.random.uniform(-0.5, 0.5)
+            yaw_vel_cmd = np.random.uniform(-1.0, 1.0)
+
         env.commands[:, 0] = x_vel_cmd
         env.commands[:, 1] = y_vel_cmd
         env.commands[:, 2] = yaw_vel_cmd
         env.commands[:, 3] = body_height_cmd
         env.commands[:, 4] = step_frequency_cmd
         env.commands[:, 5:8] = gait
-        if x_vel_cmd < 0.1:
-            env.commands[:, 8] = 1.0
-        else:
-            env.commands[:, 8] = 0.5
+        env.commands[:, 8] = 0.5
         env.commands[:, 9] = footswing_height_cmd
         env.commands[:, 10] = pitch_cmd
         env.commands[:, 11] = roll_cmd
         env.commands[:, 12] = stance_width_cmd
-        env.commands[:, 13] = stance_length_cmd
         obs, rew, done, info = env.step(actions)
 
+        camera_data = env.get_front_camera_data(0)
+        if camera_data is not None:
+            rgb = camera_data["image"]
+            depth = camera_data["depth"]
+
+            rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+            depth_vis = depth.copy()
+            depth_vis = np.clip(depth_vis, 0.0, 5.0)
+            depth_vis = (255.0 * depth_vis / 5.0).astype(np.uint8)
+
+            cv2.imshow("Front RGB", rgb_bgr)
+            cv2.imshow("Front Depth", depth_vis)
+            cv2.waitKey(1)
+
         measured_x_vels[i] = env.base_lin_vel[0, 0]
-        joint_positions[i] = env.dof_pos[0, :].cpu()
+        joint_positions[i] = env.dof_pos[0, :].cpu().numpy()
 
     # plot target and measured forward velocity
     from matplotlib import pyplot as plt
@@ -230,14 +192,8 @@ def play_aliengo(headless=True):
     axs[1].set_ylabel("Joint Position (rad)")
 
     plt.tight_layout()
-    backend = plt.get_backend().lower()
-    if "agg" in backend:
-        output_path = logdir / "play_diagnostics.png"
-        fig.savefig(output_path, dpi=160, bbox_inches="tight")
-        print(f"Matplotlib backend '{backend}' has no GUI; saved plot to {output_path}")
-    else:
-        plt.show()
-    plt.close(fig)
+    plt.show()
+    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ import torch
 from aliengo_gym import MINI_GYM_ROOT_DIR
 from aliengo_gym.envs.base.base_task import BaseTask
 from aliengo_gym.utils.math_utils import quat_apply_yaw, wrap_to_pi, get_scale_shift
-from aliengo_gym.utils.terrain import Terrain
+from aliengo_gym.utils.roboschool_terrain import Terrain
 from .legged_robot_config import Cfg
 
 
@@ -141,10 +141,10 @@ class LeggedRobot(BaseTask):
     def check_termination(self):
         """ Check if environments need to be reset
         """
-        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.,
-                                   dim=1)
+        # self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.,
+                                #    dim=1)
         self.time_out_buf = self.episode_length_buf > self.cfg.env.max_episode_length  # no terminal reward for time-outs
-        self.reset_buf |= self.time_out_buf
+        self.reset_buf = self.time_out_buf
         if self.cfg.rewards.use_terminal_body_height:
             self.body_height_buf = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1) \
                                    < self.cfg.rewards.terminal_body_height
@@ -503,9 +503,27 @@ class LeggedRobot(BaseTask):
         mesh_type = self.cfg.terrain.mesh_type
         if mesh_type in ['heightfield', 'trimesh']:
             if self.eval_cfg is not None:
-                self.terrain = Terrain(self.cfg.terrain, self.num_train_envs, self.eval_cfg.terrain, self.num_eval_envs)
+                # self.terrain = Terrain(self.cfg.terrain, self.num_train_envs, self.eval_cfg.terrain, self.num_eval_envs)
+                self.terrain = Terrain(
+                    horizontal_scale=self.cfg.terrain.horizontal_scale,
+                    vertical_scale=self.cfg.terrain.vertical_scale,
+                    border_size=self.cfg.terrain.border_size,
+                    terrain_length=self.cfg.terrain.terrain_length,
+                    terrain_width=self.cfg.terrain.terrain_width,
+                    mesh_type=self.cfg.terrain.mesh_type,
+                    slope_treshold=self.cfg.terrain.slope_treshold,
+                )
             else:
-                self.terrain = Terrain(self.cfg.terrain, self.num_train_envs)
+                # self.terrain = Terrain(self.cfg.terrain, self.num_train_envs)
+                self.terrain = Terrain(
+                    horizontal_scale=self.cfg.terrain.horizontal_scale,
+                    vertical_scale=self.cfg.terrain.vertical_scale,
+                    border_size=self.cfg.terrain.border_size,
+                    terrain_length=self.cfg.terrain.terrain_length,
+                    terrain_width=self.cfg.terrain.terrain_width,
+                    mesh_type=self.cfg.terrain.mesh_type,
+                    slope_treshold=self.cfg.terrain.slope_treshold,
+                )
         if mesh_type == 'plane':
             self._create_ground_plane()
         elif mesh_type == 'heightfield':
@@ -1303,13 +1321,8 @@ class LeggedRobot(BaseTask):
     def _init_command_distribution(self, env_ids):
         # new style curriculum
         self.category_names = ['nominal']
-        fixed_gait = getattr(self.cfg.commands, "fixed_gait", None)
-        if fixed_gait is not None:
-            self.category_names = [fixed_gait]
         if self.cfg.commands.gaitwise_curricula:
             self.category_names = ['pronk', 'trot', 'pace', 'bound']
-            if fixed_gait is not None:
-                self.category_names = [fixed_gait]
 
         if self.cfg.commands.curriculum_type == "RewardThresholdCurriculum":
             from .curriculum import RewardThresholdCurriculum
@@ -1368,8 +1381,8 @@ class LeggedRobot(BaseTask):
             for curriculum in self.curricula:
                 curriculum.set_params(lipschitz_threshold=self.cfg.commands.lipschitz_threshold,
                                       binary_phases=self.cfg.commands.binary_phases)
-        self.env_command_bins = np.zeros(len(env_ids), dtype=int)
-        self.env_command_categories = np.zeros(len(env_ids), dtype=int)
+        self.env_command_bins = np.zeros(len(env_ids), dtype=np.int)
+        self.env_command_categories = np.zeros(len(env_ids), dtype=np.int)
         low = np.array(
             [self.cfg.commands.lin_vel_x[0], self.cfg.commands.lin_vel_y[0],
              self.cfg.commands.ang_vel_yaw[0], self.cfg.commands.body_height_cmd[0],
@@ -1597,6 +1610,20 @@ class LeggedRobot(BaseTask):
                 gymapi.Vec3(1.0, 0.0, 0.0), math.radians(camera_pitch)
             )
 
+        box_asset_root = "/home/ammar/roboschool/resources/assets/textured_box"
+        box_asset_file = "textured_box.urdf"
+
+        box_asset_options = gymapi.AssetOptions()
+        box_asset_options.fix_base_link = True  # boxes don't move
+        box_asset_options.use_mesh_materials = True
+
+        self.box_asset = self.gym.load_asset(
+            self.sim,
+            box_asset_root,
+            box_asset_file,
+            box_asset_options
+        )
+
         for i in range(self.num_envs):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
@@ -1645,8 +1672,116 @@ class LeggedRobot(BaseTask):
                 self.front_camera_color_handles.append(color_camera_handle)
                 self.front_camera_depth_handles.append(depth_camera_handle)
 
+
             self.envs.append(env_handle)
             self.actor_handles.append(anymal_handle)
+
+            num_boxes = 5
+            free_radius = 0.25
+
+            placed = []
+
+            x_boxes = [4.11, 1.0, 3.91, 1.0, 1.0]
+            y_boxes = [4.32, 0.7, 8.42, 2.18, 9.13]
+
+            for b in range(num_boxes):
+                x, y = x_boxes[b], y_boxes[b]
+
+                valid = True
+                for px, py in placed:
+                    if (x - px)**2 + (y - py)**2 < (2 * free_radius)**2:
+                        valid = False
+                        break
+
+                if not valid:
+                    continue
+
+                placed.append((x, y))
+
+                pose = gymapi.Transform()
+                pose.p = gymapi.Vec3(x, y, 0.25)
+
+                box_handle = self.gym.create_actor(
+                    env_handle,
+                    self.box_asset,
+                    pose,
+                    f"box_{b}",
+                    i,
+                    0,
+                    0
+                )
+
+                pass
+            
+            # num_boxes = 5
+            # free_radius = 0.25
+
+            # rng = np.random.default_rng(i)  # different per env
+            # placed = []
+
+            # x_boxes = [4.11, 1.0, 3.91, 1.0, 1.0]
+            # y_boxes = [4.32, 0.7, 8.42, 2.18, 9.13]
+
+            # for b in range(num_boxes):
+            #     for _ in range(200):  # try multiple times
+            #         half_box = 0.25  # because box is 0.5m
+
+            #         # x = rng.uniform(
+            #         #     -self.terrain.terrain_width / 2 + half_box,
+            #         #     self.terrain.terrain_width / 2 - half_box
+            #         # ) + self.terrain.terrain_width / 2
+
+            #         # y = rng.uniform(
+            #         #     -self.terrain.terrain_length / 2 + half_box,
+            #         #     self.terrain.terrain_length / 2 - half_box
+            #         # ) + self.terrain.terrain_length / 2
+
+            #         x, y = x_boxes[b], y_boxes[b]
+
+            #         # check distance from other boxes
+            #         valid = True
+            #         for px, py in placed:
+            #             if (x - px)**2 + (y - py)**2 < (2 * free_radius)**2:
+            #                 valid = False
+            #                 break
+
+            #         if not valid:
+            #             continue
+
+            #         placed.append((x, y))
+
+            #         pose = gymapi.Transform()
+            #         pose.p = gymapi.Vec3(x, y, 0.25)  # half height
+
+            #         box_handle = self.gym.create_actor(
+            #             env_handle,
+            #             self.box_asset,
+            #             pose,
+            #             f"box_{b}",
+            #             i,
+            #             0,
+            #             0
+            #         )
+
+            #         # make texture visible (IMPORTANT)
+            #         self.gym.set_rigid_body_color(
+            #             env_handle,
+            #             box_handle,
+            #             0,
+            #             gymapi.MESH_VISUAL,
+            #             gymapi.Vec3(1.0, 1.0, 1.0)
+            #         )
+
+            #         # apply texture
+            #         self.gym.set_rigid_body_texture(
+            #             env_handle,
+            #             box_handle,
+            #             0,
+            #             gymapi.MESH_VISUAL,
+            #             self.box_textures[b % len(self.box_textures)]
+            #         )
+
+            #         break
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -1804,8 +1939,8 @@ class LeggedRobot(BaseTask):
                                                     (len(env_ids) / cfg.terrain.num_cols), rounding_mode='floor').to(
                     torch.long)
             cfg.terrain.max_terrain_level = cfg.terrain.num_rows
-            cfg.terrain.terrain_origins = torch.from_numpy(cfg.terrain.env_origins).to(self.device).to(torch.float)
-            self.env_origins[env_ids] = cfg.terrain.terrain_origins[
+            terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
+            self.env_origins[env_ids] = terrain_origins[
                 self.terrain_levels[env_ids], self.terrain_types[env_ids]]
         else:
             self.custom_origins = False
@@ -1895,7 +2030,11 @@ class LeggedRobot(BaseTask):
         points = quat_apply_yaw(self.base_quat[env_ids].repeat(1, cfg.env.num_height_points),
                                 self.height_points[env_ids]) + (self.root_states[env_ids, :3]).unsqueeze(1)
 
-        points += self.terrain.cfg.border_size
+        points[:, :, 0] += self.terrain.terrain_width / 2.0
+        points[:, :, 1] += self.terrain.terrain_length / 2.0
+        points[:, :, 0] += self.terrain.cfg.border_size
+        points[:, :, 1] += self.terrain.cfg.border_size
+        points = (points / self.terrain.cfg.horizontal_scale).long()
         points = (points / self.terrain.cfg.horizontal_scale).long()
         px = points[:, :, 0].view(-1)
         py = points[:, :, 1].view(-1)

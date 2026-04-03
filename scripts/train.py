@@ -1,53 +1,22 @@
-from pathlib import Path
-import sys
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-import numpy as np
-
-for name, value in {
-    "float": float,
-    "int": int,
-    "bool": bool,
-    "object": object,
-    "complex": complex,
-}.items():
-    if not hasattr(np, name):
-        setattr(np, name, value)  # type: ignore[attr-defined]
-
-def train_aliengo(headless=True):
+def train_go1(headless=True):
 
     import isaacgym
     assert isaacgym
     import torch
 
-    from aliengo_gym.envs.base.legged_robot_config import Cfg
-    from aliengo_gym.envs.aliengo.aliengo_config import config_aliengo
-    from aliengo_gym.envs.aliengo.velocity_tracking import VelocityTrackingEasyEnv
+    from go1_gym.envs.base.legged_robot_config import Cfg
+    from go1_gym.envs.go1.go1_config import config_go1
+    from go1_gym.envs.go1.velocity_tracking import VelocityTrackingEasyEnv
 
     from ml_logger import logger
 
-    from aliengo_gym_learn.ppo_cse import Runner
-    from aliengo_gym.envs.wrappers.history_wrapper import HistoryWrapper
-    from aliengo_gym_learn.ppo_cse.actor_critic import AC_Args
-    from aliengo_gym_learn.ppo_cse.ppo import PPO_Args
-    from aliengo_gym_learn.ppo_cse import RunnerArgs
+    from go1_gym_learn.ppo_cse import Runner
+    from go1_gym.envs.wrappers.history_wrapper import HistoryWrapper
+    from go1_gym_learn.ppo_cse.actor_critic import AC_Args
+    from go1_gym_learn.ppo_cse.ppo import PPO_Args
+    from go1_gym_learn.ppo_cse import RunnerArgs
 
-    config_aliengo(Cfg)
-
-    fixed_body_height = -0.05
-    fixed_gait_frequency = 3.0
-    fixed_gait_phase = 0.5
-    fixed_gait_offset = 0.0
-    fixed_gait_bound = 0.0
-    fixed_gait_duration = 0.5
-    fixed_footswing_height = 0.225
-    fixed_body_roll = 0.0
-    fixed_stance_width = 0.35
-    fixed_stance_length = 0.4
-    fixed_aux_reward_coef = 0.005
+    config_go1(Cfg)
 
     Cfg.commands.num_lin_vel_bins = 30
     Cfg.commands.num_ang_vel_bins = 30
@@ -60,7 +29,7 @@ def train_aliengo(headless=True):
 
     Cfg.domain_rand.lag_timesteps = 6
     Cfg.domain_rand.randomize_lag_timesteps = True
-    Cfg.control.control_type = "P"
+    Cfg.control.control_type = "actuator_net"
 
     Cfg.domain_rand.randomize_rigids_after_start = False
     Cfg.env.priv_observe_motion = False
@@ -107,16 +76,15 @@ def train_aliengo(headless=True):
     Cfg.env.priv_observe_gravity_transformed_foot_displacement = False
 
     Cfg.env.num_privileged_obs = 2
-    Cfg.env.num_observation_history = 5
-    Cfg.env.num_envs = 4096
+    Cfg.env.num_observation_history = 30
     Cfg.reward_scales.feet_contact_forces = 0.0
 
     Cfg.domain_rand.rand_interval_s = 4
     Cfg.commands.num_commands = 15
-    Cfg.env.observe_two_prev_actions = False
+    Cfg.env.observe_two_prev_actions = True
     Cfg.env.observe_yaw = False
-    Cfg.env.num_observations = 58
-    Cfg.env.num_scalar_observations = 58
+    Cfg.env.num_observations = 70
+    Cfg.env.num_scalar_observations = 70
     Cfg.env.observe_gait_commands = True
     Cfg.env.observe_timing_parameter = False
     Cfg.env.observe_clock_inputs = True
@@ -174,44 +142,43 @@ def train_aliengo(headless=True):
     Cfg.reward_scales.tracking_contacts_shaped_force = 4.0
     Cfg.reward_scales.tracking_contacts_shaped_vel = 4.0
     Cfg.reward_scales.collision = -5.0
-    Cfg.reward_scales.stand_still = -0.2
 
     Cfg.rewards.reward_container_name = "CoRLRewards"
     Cfg.rewards.only_positive_rewards = False
     Cfg.rewards.only_positive_rewards_ji22_style = True
     Cfg.rewards.sigma_rew_neg = 0.02
 
-    Cfg.commands.lin_vel_x = [-1.5, 1.5]
-    Cfg.commands.lin_vel_y = [-0.75, 0.75]
-    Cfg.commands.ang_vel_yaw = [-1.0, 1.0]
-    Cfg.commands.body_height_cmd = [fixed_body_height, fixed_body_height]
-    Cfg.commands.gait_frequency_cmd_range = [fixed_gait_frequency, fixed_gait_frequency]
-    Cfg.commands.gait_phase_cmd_range = [fixed_gait_phase, fixed_gait_phase]
-    Cfg.commands.gait_offset_cmd_range = [fixed_gait_offset, fixed_gait_offset]
-    Cfg.commands.gait_bound_cmd_range = [fixed_gait_bound, fixed_gait_bound]
-    Cfg.commands.gait_duration_cmd_range = [fixed_gait_duration, fixed_gait_duration]
-    Cfg.commands.footswing_height_range = [fixed_footswing_height, fixed_footswing_height]
-    Cfg.commands.body_pitch_range = [-0.4, 0.4]
-    Cfg.commands.body_roll_range = [fixed_body_roll, fixed_body_roll]
-    Cfg.commands.stance_width_range = [fixed_stance_width, fixed_stance_width]
-    Cfg.commands.stance_length_range = [fixed_stance_length, fixed_stance_length]
-    Cfg.commands.aux_reward_coef_range = [fixed_aux_reward_coef, fixed_aux_reward_coef]
 
-    Cfg.commands.limit_vel_x = [-1.5, 1.5]
-    Cfg.commands.limit_vel_y = [-0.75, 0.75]
-    Cfg.commands.limit_vel_yaw = [-1.0, 1.0]
-    Cfg.commands.limit_body_height = [fixed_body_height, fixed_body_height]
-    Cfg.commands.limit_gait_frequency = [fixed_gait_frequency, fixed_gait_frequency]
-    Cfg.commands.limit_gait_phase = [fixed_gait_phase, fixed_gait_phase]
-    Cfg.commands.limit_gait_offset = [fixed_gait_offset, fixed_gait_offset]
-    Cfg.commands.limit_gait_bound = [fixed_gait_bound, fixed_gait_bound]
-    Cfg.commands.limit_gait_duration = [fixed_gait_duration, fixed_gait_duration]
-    Cfg.commands.limit_footswing_height = [fixed_footswing_height, fixed_footswing_height]
+
+    Cfg.commands.lin_vel_x = [-1.0, 1.0]
+    Cfg.commands.lin_vel_y = [-0.6, 0.6]
+    Cfg.commands.ang_vel_yaw = [-1.0, 1.0]
+    Cfg.commands.body_height_cmd = [-0.25, 0.15]
+    Cfg.commands.gait_frequency_cmd_range = [2.0, 4.0]
+    Cfg.commands.gait_phase_cmd_range = [0.0, 1.0]
+    Cfg.commands.gait_offset_cmd_range = [0.0, 1.0]
+    Cfg.commands.gait_bound_cmd_range = [0.0, 1.0]
+    Cfg.commands.gait_duration_cmd_range = [0.5, 0.5]
+    Cfg.commands.footswing_height_range = [0.03, 0.35]
+    Cfg.commands.body_pitch_range = [-0.4, 0.4]
+    Cfg.commands.body_roll_range = [-0.0, 0.0]
+    Cfg.commands.stance_width_range = [0.10, 0.45]
+    Cfg.commands.stance_length_range = [0.35, 0.45]
+
+    Cfg.commands.limit_vel_x = [-5.0, 5.0]
+    Cfg.commands.limit_vel_y = [-0.6, 0.6]
+    Cfg.commands.limit_vel_yaw = [-5.0, 5.0]
+    Cfg.commands.limit_body_height = [-0.25, 0.15]
+    Cfg.commands.limit_gait_frequency = [2.0, 4.0]
+    Cfg.commands.limit_gait_phase = [0.0, 1.0]
+    Cfg.commands.limit_gait_offset = [0.0, 1.0]
+    Cfg.commands.limit_gait_bound = [0.0, 1.0]
+    Cfg.commands.limit_gait_duration = [0.5, 0.5]
+    Cfg.commands.limit_footswing_height = [0.03, 0.35]
     Cfg.commands.limit_body_pitch = [-0.4, 0.4]
-    Cfg.commands.limit_body_roll = [fixed_body_roll, fixed_body_roll]
-    Cfg.commands.limit_aux_reward_coef = [fixed_aux_reward_coef, fixed_aux_reward_coef]
-    Cfg.commands.limit_stance_width = [fixed_stance_width, fixed_stance_width]
-    Cfg.commands.limit_stance_length = [fixed_stance_length, fixed_stance_length]
+    Cfg.commands.limit_body_roll = [-0.0, 0.0]
+    Cfg.commands.limit_stance_width = [0.10, 0.45]
+    Cfg.commands.limit_stance_length = [0.35, 0.45]
 
     Cfg.commands.num_bins_vel_x = 21
     Cfg.commands.num_bins_vel_y = 1
@@ -236,12 +203,8 @@ def train_aliengo(headless=True):
     Cfg.commands.pacing_offset = False
     Cfg.commands.binary_phases = True
     Cfg.commands.gaitwise_curricula = True
-    Cfg.commands.fixed_gait = "trot"
 
-    RunnerArgs.max_iterations = 1500
-    RunnerArgs.save_interval = 100
-
-    env = VelocityTrackingEasyEnv(sim_device='cuda:0', headless=headless, cfg=Cfg)
+    env = VelocityTrackingEasyEnv(sim_device='cuda:0', headless=False, cfg=Cfg)
 
     # log the experiment parameters
     logger.log_params(AC_Args=vars(AC_Args), PPO_Args=vars(PPO_Args), RunnerArgs=vars(RunnerArgs),
@@ -250,13 +213,13 @@ def train_aliengo(headless=True):
     env = HistoryWrapper(env)
     gpu_id = 0
     runner = Runner(env, device=f"cuda:{gpu_id}")
-    runner.learn(num_learning_iterations=1500, init_at_random_ep_len=True, eval_freq=100)
+    runner.learn(num_learning_iterations=100000, init_at_random_ep_len=True, eval_freq=100)
 
 
 if __name__ == '__main__':
     from pathlib import Path
     from ml_logger import logger
-    from aliengo_gym import MINI_GYM_ROOT_DIR
+    from go1_gym import MINI_GYM_ROOT_DIR
 
     stem = Path(__file__).stem
     logger.configure(logger.utcnow(f'gait-conditioned-agility/%Y-%m-%d/{stem}/%H%M%S.%f'),
@@ -290,4 +253,4 @@ if __name__ == '__main__':
                 """, filename=".charts.yml", dedent=True)
 
     # to see the environment rendering, set headless=False
-    train_aliengo(headless=True)
+    train_go1(headless=False)
