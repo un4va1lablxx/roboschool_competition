@@ -3,9 +3,13 @@ import isaacgym
 assert isaacgym
 import torch
 import numpy as np
-import cv2
+from pathlib import Path
+from typing import Optional
+try:
+    import cv2
+except ModuleNotFoundError:
+    cv2 = None
 
-import glob
 import pickle as pkl
 
 from aliengo_gym.envs import *
@@ -15,10 +19,62 @@ from aliengo_gym.envs.aliengo.velocity_tracking import VelocityTrackingEasyEnv
 
 from tqdm import tqdm
 
-def load_policy(logdir):
-    body = torch.jit.load(logdir + '/checkpoints/body_latest.jit')
-    import os
-    adaptation_module = torch.jit.load(logdir + '/checkpoints/adaptation_module_latest.jit')
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _iter_policy_run_dirs(search_root: Path):
+    if not search_root.is_dir():
+        return []
+    run_dirs = []
+    for body_jit in search_root.rglob("body_latest.jit"):
+        checkpoints_dir = body_jit.parent
+        run_dir = checkpoints_dir.parent
+        if (checkpoints_dir / "adaptation_module_latest.jit").is_file():
+            run_dirs.append(run_dir)
+    return run_dirs
+
+
+def _resolve_run_dir(label) -> Path:
+    runs_root = _project_root() / "runs"
+    label_str = str(label)
+
+    direct = Path(label_str).expanduser()
+    if direct.is_dir():
+        return direct.resolve()
+    cwd_relative = (Path.cwd() / direct).resolve()
+    if cwd_relative.is_dir():
+        return cwd_relative
+
+    profile_name = label_str.split("/")[0].strip()
+    profile_root = runs_root / profile_name
+    search_root = profile_root if profile_root.is_dir() else runs_root
+
+    run_dirs = _iter_policy_run_dirs(search_root)
+    if not run_dirs:
+        raise FileNotFoundError(
+            f"No policy run directories found under {search_root}. "
+            f"Expected checkpoints/body_latest.jit and adaptation_module_latest.jit."
+        )
+
+    return max(run_dirs, key=lambda path: path.stat().st_mtime)
+
+
+def _resolve_parameters_path(run_dir: Path) -> Optional[Path]:
+    direct = run_dir / "parameters.pkl"
+    if direct.is_file():
+        return direct
+
+    profile_root = run_dir.parents[2] if len(run_dir.parents) >= 3 else (_project_root() / "runs")
+    candidates = sorted(profile_root.rglob("parameters.pkl"), key=lambda path: path.stat().st_mtime)
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def load_policy(logdir: Path):
+    body = torch.jit.load(str(logdir / "checkpoints" / "body_latest.jit"))
+    adaptation_module = torch.jit.load(str(logdir / "checkpoints" / "adaptation_module_latest.jit"))
 
     def policy(obs, info={}):
         i = 0
@@ -31,19 +87,25 @@ def load_policy(logdir):
 
 
 def load_env(label, headless=False):
-    dirs = glob.glob(f"../runs/{label}/*")
-    logdir = sorted(dirs)[0]
+    logdir = _resolve_run_dir(label)
+    print(f"Loading policy run from: {logdir}")
 
-    with open(logdir + "/parameters.pkl", 'rb') as file:
-        pkl_cfg = pkl.load(file)
-        print(pkl_cfg.keys())
-        cfg = pkl_cfg["Cfg"]
-        print(cfg.keys())
-
-        for key, value in cfg.items():
-            if hasattr(Cfg, key):
-                for key2, value2 in cfg[key].items():
-                    setattr(getattr(Cfg, key), key2, value2)
+    params_path = _resolve_parameters_path(logdir)
+    if params_path is not None:
+        with open(params_path, "rb") as file:
+            pkl_cfg = pkl.load(file)
+            cfg = pkl_cfg["Cfg"]
+            for key, value in cfg.items():
+                if hasattr(Cfg, key):
+                    for key2, value2 in cfg[key].items():
+                        setattr(getattr(Cfg, key), key2, value2)
+        if params_path.parent != logdir:
+            print(f"parameters.pkl not found in run dir; using fallback config: {params_path}")
+    else:
+        print(
+            "Warning: parameters.pkl was not found. "
+            "Using current in-code defaults for Cfg."
+        )
 
     # turn off DR for evaluation script
     Cfg.domain_rand.push_robots = False
@@ -85,8 +147,10 @@ def load_env(label, headless=False):
     Cfg.env.front_camera_depth_height_px = 424
     Cfg.env.front_camera_color_fov_h_deg = 70.0
     Cfg.env.front_camera_depth_fov_h_deg = 86.0
-    Cfg.env.front_camera_offset_xyz = [0.35, 0.0, 0.10]
-    Cfg.env.front_camera_pitch_deg = 0.0
+    # Keep the camera inside trunk collision bounds, but close to the front
+    # upper area so the body shell does not dominate the view.
+    Cfg.env.front_camera_offset_xyz = [0.315, 0.0, 0.052]
+    Cfg.env.front_camera_pitch_deg = -4.0
 
     from aliengo_gym.envs.wrappers.history_wrapper import HistoryWrapper
 
@@ -105,12 +169,7 @@ def load_env(label, headless=False):
 def play_aliengo(headless=True):
     from ml_logger import logger
 
-    from pathlib import Path
-    from aliengo_gym import MINI_GYM_ROOT_DIR
-    import glob
-    import os
-
-    label = "gait-conditioned-agility/aliengo-v0/train"
+    label = "gait-conditioned-agility"
 
     env, policy = load_env(label, headless=headless)
 
@@ -136,6 +195,9 @@ def play_aliengo(headless=True):
 
     obs = env.reset()
 
+    if cv2 is None:
+        print("cv2 is not installed; camera visualization windows are disabled.")
+
     for i in tqdm(range(num_eval_steps)):
         with torch.no_grad():
             actions = policy(obs)
@@ -159,7 +221,7 @@ def play_aliengo(headless=True):
         obs, rew, done, info = env.step(actions)
 
         camera_data = env.get_front_camera_data(0)
-        if camera_data is not None:
+        if camera_data is not None and cv2 is not None:
             rgb = camera_data["image"]
             depth = camera_data["depth"]
 
@@ -193,7 +255,8 @@ def play_aliengo(headless=True):
 
     plt.tight_layout()
     plt.show()
-    cv2.destroyAllWindows()
+    if cv2 is not None:
+        cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':

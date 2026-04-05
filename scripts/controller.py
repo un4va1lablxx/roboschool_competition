@@ -9,9 +9,18 @@ for candidate in (PROJECT_ROOT / "src", PROJECT_ROOT):
 from aliengo_competition.common.helpers import get_args
 from aliengo_competition.controllers.main_controller import run
 from aliengo_competition.robot_interface.factory import make_robot_interface
+from scripts.controller_user import UserSpeedController
+
+DEFAULT_CONTROLLER_RUN = (
+    PROJECT_ROOT / "runs" / "gait-conditioned-agility" / "2026-04-01" / "train" / "124256.867761"
+)
 
 
-def controller(args):
+def main() -> None:
+    args = get_args()
+    if args.load_run in (None, "", -1, "-1"):
+        args.load_run = str(DEFAULT_CONTROLLER_RUN)
+        print(f"[Controller] Using default policy run: {args.load_run}")
     robot = make_robot_interface(
         args=args,
         task=args.task,
@@ -21,7 +30,8 @@ def controller(args):
         checkpoint=args.checkpoint,
     )
     run(
-        robot,
+        robot=robot,
+        controller=UserSpeedController(),
         steps=args.steps,
         render_camera=args.render_camera,
         camera_depth_max_m=args.camera_depth_max_m,
@@ -29,4 +39,4 @@ def controller(args):
 
 
 if __name__ == "__main__":
-    controller(get_args())
+    main()

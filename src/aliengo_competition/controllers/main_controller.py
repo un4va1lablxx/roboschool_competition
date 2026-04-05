@@ -1,45 +1,38 @@
 from __future__ import annotations
 
-import math
-from typing import Any
+from abc import ABC, abstractmethod
 
 import numpy as np
 
 from aliengo_competition.robot_interface.base import AliengoRobotInterface
+from aliengo_competition.robot_interface.types import CameraState, RobotState, VelocityCommand
 
 
-def _extract_base_observation(obs):
-    if isinstance(obs, dict):
-        obs = obs.get("obs", obs)
-    if hasattr(obs, "ndim") and obs.ndim > 1:
-        obs = obs[0]
-    return obs
+class SpeedController(ABC):
+    """Upper-level controller API: compute only speed commands."""
+
+    def on_reset(self, state: RobotState) -> None:
+        _ = state
+
+    @abstractmethod
+    def compute_command(self, state: RobotState) -> VelocityCommand:
+        raise NotImplementedError
 
 
-def _unwrap_env_from_robot(robot: AliengoRobotInterface):
-    env = getattr(robot, "env", None)
-    while env is not None and hasattr(env, "env") and getattr(env, "env") is not env:
-        env = env.env
-    return env
+class FixedSpeedController(SpeedController):
+    def __init__(self, vx: float = 0.0, vy: float = 0.0, vw: float = 0.0):
+        self._command = VelocityCommand(vx=float(vx), vy=float(vy), vw=float(vw))
 
-
-def _infer_control_dt(robot: AliengoRobotInterface, fallback_dt: float = 0.02) -> float:
-    env = _unwrap_env_from_robot(robot)
-    dt = getattr(env, "dt", None) if env is not None else None
-    try:
-        dt_value = float(dt)
-        if dt_value > 0.0:
-            return dt_value
-    except (TypeError, ValueError):
-        pass
-    return float(fallback_dt)
+    def compute_command(self, state: RobotState) -> VelocityCommand:
+        _ = state
+        return self._command
 
 
 class _CameraRenderer:
     def __init__(self, enabled: bool, depth_max_m: float):
         self.enabled = bool(enabled)
         self.depth_max_m = max(float(depth_max_m), 0.1)
-        self._window_name = "Front Camera (Intel RealSense D435-like)"
+        self._window_name = "Front Camera (RGB + Depth)"
         self._cv2 = None
         self._active = False
         if not self.enabled:
@@ -54,42 +47,31 @@ class _CameraRenderer:
         self._cv2.namedWindow(self._window_name, self._cv2.WINDOW_NORMAL)
         self._active = True
 
-    def show(self, camera: Any) -> None:
-        if not self._active or not isinstance(camera, dict):
+    def show(self, camera: CameraState) -> None:
+        if not self._active:
             return
-        image = camera.get("image")
-        depth = camera.get("depth")
-        if image is None or depth is None:
+        rgb = camera.rgb
+        depth = camera.depth
+        if rgb is None or depth is None:
             return
 
-        rgb = np.asarray(image)
+        rgb = np.asarray(rgb)
         depth_m = np.asarray(depth, dtype=np.float32)
         if rgb.ndim != 3 or rgb.shape[2] < 3 or depth_m.ndim != 2:
             return
         if rgb.dtype != np.uint8:
             rgb = np.clip(rgb, 0, 255).astype(np.uint8)
         rgb = rgb[..., :3]
+
         depth_m = np.nan_to_num(depth_m, nan=0.0, posinf=self.depth_max_m, neginf=0.0)
         depth_m = np.clip(depth_m, 0.0, self.depth_max_m)
-        depth_u8 = (depth_m * (255.0 / self.depth_max_m)).astype(np.uint8)
+        depth_u8 = (255.0 * depth_m / self.depth_max_m).astype(np.uint8)
 
         cv2 = self._cv2
         depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
         depth_color = cv2.resize(depth_color, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
         rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         view = np.concatenate((rgb_bgr, depth_color), axis=1)
-
-        cv2.putText(view, "RGB", (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(
-            view,
-            f"Depth 0..{self.depth_max_m:.1f}m",
-            (rgb.shape[1] + 10, 26),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
         cv2.imshow(self._window_name, view)
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
@@ -104,91 +86,53 @@ class _CameraRenderer:
 
 def run(
     robot: AliengoRobotInterface,
+    controller: SpeedController,
     steps: int = 1000,
     render_camera: bool = False,
     camera_depth_max_m: float = 10.0,
+    reset_on_fall: bool = True,
 ) -> None:
-    robot.reset()
-    camera_renderer = _CameraRenderer(enabled=render_camera, depth_max_m=camera_depth_max_m)
-    control_dt = _infer_control_dt(robot, fallback_dt=0.02)
-    requested_steps = max(int(steps), 1)
-    nominal_dt = 0.02
-    target_duration_s = requested_steps * nominal_dt
-    total_steps = max(int(round(target_duration_s / control_dt)), 1)
-    print(
-        f"[Controller] dt={control_dt:.4f}s, requested_steps={requested_steps}, "
-        f"effective_steps={total_steps}"
-    )
+    total_steps = max(int(steps), 1)
+    renderer = _CameraRenderer(enabled=render_camera, depth_max_m=camera_depth_max_m)
 
-    # User-editable blocks in this file:
-    # 1. USER PARAMETERS START / END
-    # 2. USER CONTROL LOGIC START / END
-
-    # ================= USER PARAMETERS START =================
-    # Tune these values to change the demo behavior. Time-based settings are
-    # converted with env.dt, so behavior is stable when sim step changes.
-    warmup_s = 0.4
-    ramp_s = 1.2
-    trajectory_period_s = 8.0
-    forward_speed_mean = 0.40
-    forward_speed_amp = 0.35
-    lateral_speed_amp = 0.22
-    yaw_rate_amp = 0.75
-    yaw_rate_damping = 0.55
-    pitch_amp = 0.08
-    ang_vel_scale = 0.25
-    # ================== USER PARAMETERS END ==================
-
-    segment_start_t = 0.0
+    state = robot.reset()
+    controller.on_reset(state)
+    print(f"[Controller] dt={robot.get_control_dt():.4f}s, steps={total_steps}")
 
     try:
-        for step_index in range(total_steps):
-            obs = robot.get_observation()
-            camera = robot.get_camera()
-            _ = obs
-            camera_renderer.show(camera)
-            base_obs = _extract_base_observation(obs)
-            omega_z = float(base_obs[5].item()) / ang_vel_scale if len(base_obs) > 5 else 0.0
+        for _ in range(total_steps):
+            state = robot.read_state()
+            command = controller.compute_command(state)
+            robot.set_velocity_command(vx=command.vx, vy=command.vy, vw=command.vw)
 
-            # ================= USER CONTROL LOGIC START =================
-            # This block is the intended place for participant logic.
-            # You can:
-            # - read obs / camera
-            # - compute desired vx, vy, vw
-            # - compute desired body pitch
-            #
-            # Example below:
-            # - smooth warmup
-            # - continuous figure-eight in velocity space
-            # - yaw-rate command combines feed-forward turn and damping
-            sim_t = step_index * control_dt
-            local_t = max(sim_t - segment_start_t, 0.0)
-            if local_t < warmup_s:
-                vx = 0.0
-                vy = 0.0
-                vw = 0.0
-                pitch = 0.0
-            else:
-                motion_t = local_t - warmup_s
-                phase = 2.0 * math.pi * motion_t / max(trajectory_period_s, control_dt)
-                ramp = min(motion_t / max(ramp_s, control_dt), 1.0)
+            state = robot.step()
+            renderer.show(state.camera)
 
-                vx = ramp * (forward_speed_mean + forward_speed_amp * math.cos(phase))
-                vy = ramp * (lateral_speed_amp * math.sin(2.0 * phase))
-                yaw_ff = yaw_rate_amp * math.sin(phase + math.pi / 4.0)
-                vw = ramp * (yaw_ff - yaw_rate_damping * omega_z)
-                vw = max(min(vw, 1.0), -1.0)
-                pitch = ramp * pitch_amp * math.sin(phase + math.pi / 2.0)
-            # ================== USER CONTROL LOGIC END ==================
-
-            robot.set_speed(vx, vy, vw)
-            robot.set_body_pitch(pitch)
-            robot.step()
-            if robot.is_fallen():
+            if reset_on_fall and robot.is_fallen():
                 robot.stop()
-                robot.reset()
-                segment_start_t = (step_index + 1) * control_dt
-                continue
+                state = robot.reset()
+                controller.on_reset(state)
     finally:
-        camera_renderer.close()
+        renderer.close()
         robot.stop()
+
+
+def run_fixed_speed(
+    robot: AliengoRobotInterface,
+    *,
+    vx: float = 0.0,
+    vy: float = 0.0,
+    vw: float = 0.0,
+    steps: int = 1000,
+    render_camera: bool = False,
+    camera_depth_max_m: float = 10.0,
+    reset_on_fall: bool = True,
+) -> None:
+    run(
+        robot=robot,
+        controller=FixedSpeedController(vx=vx, vy=vy, vw=vw),
+        steps=steps,
+        render_camera=render_camera,
+        camera_depth_max_m=camera_depth_max_m,
+        reset_on_fall=reset_on_fall,
+    )

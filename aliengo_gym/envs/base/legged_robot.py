@@ -1610,7 +1610,7 @@ class LeggedRobot(BaseTask):
                 gymapi.Vec3(1.0, 0.0, 0.0), math.radians(camera_pitch)
             )
 
-        box_asset_root = "/home/ammar/roboschool/resources/assets/textured_box"
+        box_asset_root = os.path.join(MINI_GYM_ROOT_DIR, "resources", "assets", "textured_box")
         box_asset_file = "textured_box.urdf"
 
         box_asset_options = gymapi.AssetOptions()

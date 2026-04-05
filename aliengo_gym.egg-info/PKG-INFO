@@ -14,3 +14,4 @@ Requires-Dist: gym>=0.14.0
 Requires-Dist: tqdm
 Requires-Dist: matplotlib
 Requires-Dist: numpy==1.23.5
+Requires-Dist: opencv-python==4.8.1.78
